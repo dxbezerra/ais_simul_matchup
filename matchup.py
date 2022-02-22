@@ -5,91 +5,152 @@
 #
 # Autor: Diego Xavier Bezerra - Bolsista projeto CNPq 06/2020
 # Email: diegoxavier95@gmail.com
-# Data 21/02/2022
+# Data 22/02/2022
 #
 
-# Importar módulos
-from datetime import datetime as dt
+# IMPORTAR MÓDULOS
 from datetime import timedelta
 import pandas as pd
 import geopandas as gpd
 import os
+from matplotlib import pyplot as plt
 
-import rasterio
-from shapely.geometry import box
-import subprocess
-import numpy as np
-from sklearn import metrics
-from glob import glob
-import gdal
-from descartes import PolygonPatch
-from gdalconst import GA_ReadOnly
-from shapely.geometry import Point, LineString, Polygon
-import matplotlib.patches as pat
-import zipfile
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-import matplotlib.lines as mlines
-from matplotlib import colors
-
-# # 2022-01-16 06:58:37
-# INDEX? sem index - pois pandas vai criar
-# dt eh timestamp
+# IGNORAR WARNINGS
 # mmsi,nome,irin,imo,tipo,lat,lon,rumo,velocidade,fonte,timestamp
-
-# CARREGAR SIMULAÇÃO
-simul_path = r"./simul_back_100_Fortaleza_2m_ts.csv"
-simul = pd.read_csv(simul_path, index_col=0)
-simul = simul.dropna()
-
-    # Criar timestamp
-simul['dt'] = pd.to_datetime(simul['timestamp'], format='%Y-%m-%d %H:%M')
-simul = simul.sort_values(by='dt')
-
-    # Criar GeoDataFrame
-parcels = gpd.GeoDataFrame(simul, geometry=gpd.points_from_xy(simul.lon, simul.lat))
-parcels.crs = {'init': 'epsg:4326'}
-parcels['dt'] = pd.to_datetime(parcels['timestamp'], format='%Y-%m-%d %H:%M')
-
-# CARREGAR AIS
-ais = pd.read_csv('./AIS_CE_202201.csv')
-
-
-# MATCHUP ESPAÇO-TEMPORAL
 pd.options.mode.chained_assignment = None  # default='warn'
 
-dt_ais_series = gdf['dt']
-within_lst = []
-tdelta = 12  # hours
-buffer_size = 0.2  # 0.2 decimal degrees ~ 22 km
 
-for row in parcels.itertuples():
-    print(row.Index, '/', parcels.shape[0])
+def csv2gdf(csv_path):
+    '''
+    Rotina para carregar o arquivo .csv (deve estar organizado) e gerar
+    o GeoDataFrame para posterior cruzamento espaço-temporal
+    '''
 
-    # Match temporal
-    hour_ini, hour_final = row.dt - timedelta(hours=tdelta/2), row.dt + timedelta(hours=tdelta/2)
-    hour_filtered = gdf[(dt_ais_series > hour_ini) & (dt_ais_series <= hour_final)]
-    if hour_filtered.size != 0:
-        # print(hour_filtered)
+    # Carregar arquivo csv
+    csv = pd.read_csv(csv_path)
+
+    # Criar objeto datetime para o cruzamento temporal
+    csv['dt'] = pd.to_datetime(csv['timestamp'], format='%Y-%m-%d %H:%M:%S')
+
+    # Criar GeoDataFrame para o cruzamento espacial
+    csv_gdf = gpd.GeoDataFrame(csv, geometry=gpd.points_from_xy(csv.lon, csv.lat))
+    csv_gdf.crs = {'init': 'epsg:4326'}  # Setar sistema de coordenadas WGS-84
+
+    return csv_gdf
+
+
+def matchup(simul, ais, tdelta=12, buffer_size=0.2):
+    '''
+    Rotina para matchup espaço-temporal
+
+    simul: GeoDataFrame dos pontos resultantes da simulação de dispersão de óleo
+    ais: GeoDataFrame das mensagens AIS
+    tdelta: diferença do tempo (em horas) para busca temporal. 12h buscará +/- 6h
+    de diferenca entre parcelas e AIS.
+    buffer_size: tamanho da área de busca em volta das parcelas da simulação (graus decimais)
+    0.2 graus é aproximadamente 22 km no equador.
+    '''
+
+    dt_ais_series = ais['dt']  # série temporal das mensagens ais
+    within_lst = []  # lista vazia para guardar selecionados
+
+    # Loop para cada parcela da simulação (cada linha da tabela simul)
+    for row in simul.itertuples():
+        print('Parcela', row.Index+1, 'de', simul.shape[0])
+
+        # Match temporal
+        hour_ini, hour_final = row.dt - timedelta(hours=tdelta/2), row.dt + timedelta(hours=tdelta/2)  # obtém hora inicial e final de acordo com tdelta setado (+/- se de tdelta for 12h)
+        hour_filtered = ais[(dt_ais_series > hour_ini) & (dt_ais_series <= hour_final)]  # seleção das msgs AIS que casam temporalmente
 
         # Match espacial
-        polygon = row.geometry.buffer(buffer_size)
-        suspects = hour_filtered[hour_filtered.geometry.within(polygon)]
+        polygon = row.geometry.buffer(buffer_size)  # cria região de buffer (círculo envolto a parcela da simulação)
+        suspects = hour_filtered[hour_filtered.geometry.within(polygon)]  # obtém mensagens AIS que estão dentro do círculo
 
+        # Se houver registro de suspeitos, prosseguir para guardá-los na lista within_lst
         if suspects.size != 0:
+
+            # Calcular tempo entre suspeito e parcela
             closest_time = abs(suspects.dt - row.dt)
             tdelta_h = closest_time.dt.total_seconds() / 3600
+
+            # Obter identificação da parcela
             parcel_idx = row.Index
 
+            # Guardar informações na lista
             suspects['parcel_idx'] = parcel_idx
             suspects['tdelta_h'] = tdelta_h
             within_lst.append(suspects)
-            # print(suspects)
 
-            # break
-            # break
-            # break
+    # Transformar lista para GeoDataFrame
+    suspects_gdf = pd.concat(within_lst).drop_duplicates().sort_values(by='dt')
 
-gdf_suspects = pd.concat(within_lst).drop_duplicates().sort_values(by='dt')
+    return suspects_gdf
 
 
-# SELECIONAR MELHOR MENSAGEM AIS
+def refine(suspects_gdf):
+    '''
+    Algumas mensagens de mesma posição ocorrem mais que uma vez.
+    Então esta função realiza refino das embarcações supeitas.
+    '''
+
+    # Primeiro cria-se uma chave única de posição
+    suspects_gdf['pos_unq'] = suspects_gdf.lat * suspects_gdf.lon
+
+    # Para cada chave única, seleciona-se a mensagem mais próxima temporalmente
+    suspects_refined_lst = [suspects_gdf.loc[suspects_gdf['pos_unq'] == unq_key].sort_values('tdelta_h').iloc[0] for unq_key in suspects_gdf.pos_unq.values]
+    suspects_refined = gpd.GeoDataFrame(suspects_refined_lst)  # recria o GeoDataFrame
+
+    return suspects_refined
+
+
+def write(suspects_refined, filename, save_shp=False):
+    '''
+    Salva GeoDataFrame em formatos shapefile (para usar em SIGs) e .csv (tabela)
+    '''
+    suspects_gdf.to_csv(f'./{filename}.csv')
+
+    if save_shp:
+        suspects_tmp = suspects_gdf.drop('dt', axis=1)
+        suspects_tmp.to_file(f'./{filename}.shp')
+
+
+def plot(simul, suspects_gdf):
+    fig, ax = plt.subplots(dpi=150)
+
+    world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
+    world.plot(ax=ax, color='lightgray', edgecolor='black', markersize=8)
+
+    simul.plot(ax=ax, c='r', marker='.', markersize=4)
+    suspects_gdf.plot(ax=ax, c='g', marker='D', markersize=4)
+
+    ax.set_title('Simulação vs. Embarcações suspeitas')
+    ax.set_xlabel('Longitude (°)'), ax.set_ylabel('Latitude (°)')
+    ax.set_xlim(-50, -10), ax.set_ylim(-30, 10)
+    ax.grid(ls=':', color='dimgray', zorder=10)
+
+    plt.show()
+    plt.close()
+
+
+# Setar diretório de trabalho
+os.chdir(r'C:\Users\diego_home\Documents\BLOG_PORTFOLIO\ais_simul_matchup')
+
+# Caminho dos arquivos de simulação e AIS
+simul_path = r"./simul_back_Fortaleza_subset.csv"
+ais_path = r"./AIS_CE_202201_subset.csv"
+
+# CARREGAR AIS E SIMULAÇAO
+simul = csv2gdf(simul_path)
+ais = csv2gdf(ais_path)
+
+# MATCHUP ESPAÇO-TEMPORAL
+suspects_gdf = matchup(simul, ais)
+
+# REFINAR RESULTADOS
+suspects_refined = refine(suspects_gdf)
+
+# SALVAR
+write(suspects_refined, 'AIS_CE_202201_subset_suspects', save_shp=True)
+
+# PLOTAR SIMULAÇAO VS EMBARCAÇÕES SUSPEITAS
+plot(simul, suspects_gdf)
