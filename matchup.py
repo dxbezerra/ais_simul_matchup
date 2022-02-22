@@ -93,11 +93,13 @@ def refine(suspects_gdf):
     Então esta função realiza refino das embarcações supeitas.
     '''
 
+    print('Refining...')
     # Primeiro cria-se uma chave única de posição
     suspects_gdf['pos_unq'] = suspects_gdf.lat * suspects_gdf.lon
 
     # Para cada chave única, seleciona-se a mensagem mais próxima temporalmente
-    suspects_refined_lst = [suspects_gdf.loc[suspects_gdf['pos_unq'] == unq_key].sort_values('tdelta_h').iloc[0] for unq_key in suspects_gdf.pos_unq.values]
+    suspects_refined_lst = [suspects_gdf.loc[suspects_gdf['pos_unq'] == unq_key].sort_values('tdelta_h').iloc[0] for unq_key in suspects_gdf.pos_unq.unique()]
+
     suspects_refined = gpd.GeoDataFrame(suspects_refined_lst)  # recria o GeoDataFrame
 
     return suspects_refined
@@ -107,10 +109,11 @@ def write(suspects_refined, filename, save_shp=False):
     '''
     Salva GeoDataFrame em formatos shapefile (para usar em SIGs) e .csv (tabela)
     '''
-    suspects_gdf.to_csv(f'./{filename}.csv')
+    suspects_refined.to_csv(f'./{filename}.csv')
 
     if save_shp:
-        suspects_tmp = suspects_gdf.drop('dt', axis=1)
+        suspects_tmp = suspects_refined.drop('dt', axis=1)
+        suspects_tmp.crs = {'init': 'epsg:4326'}  # Setar sistema de coordenadas WGS-84
         suspects_tmp.to_file(f'./{filename}.shp')
 
 
@@ -144,7 +147,7 @@ simul = csv2gdf(simul_path)
 ais = csv2gdf(ais_path)
 
 # MATCHUP ESPAÇO-TEMPORAL
-suspects_gdf = matchup(simul, ais)
+suspects_gdf = matchup(simul, ais, tdelta=12, buffer_size=0.2)
 
 # REFINAR RESULTADOS
 suspects_refined = refine(suspects_gdf)
