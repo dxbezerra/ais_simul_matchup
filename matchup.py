@@ -6,7 +6,7 @@
 # Autor: Diego Xavier Bezerra - Bolsista projeto CNPq 06/2020
 # Email: diegoxavier95@gmail.com
 # Data 22/02/2022
-#
+# Versão 1.0.1
 
 # IMPORTAR MÓDULOS
 from datetime import timedelta
@@ -17,6 +17,11 @@ from matplotlib import pyplot as plt
 
 # IGNORAR WARNINGS
 # mmsi,nome,irin,imo,tipo,lat,lon,rumo,velocidade,fonte,timestamp
+# for i, row in parcels.iterrows():
+#     parcels.loc[i, 'timestamp'] = f"{str(int(row.ano))}-{str(int(row.mes)).zfill(2)}-{str(int(row.dia)).zfill(2)} {str(int(row.hora)).zfill(2)}:{str(int(row['min'])).zfill(2)}:00"
+#
+# parcels.dropna()[['n_parcel','lat','lon','timestamp']].to_csv(r"G:\My Drive\INPE\dissertacao\edital_cnpq06\oleo_ce_2022\simul_back_100_Fortaleza_2m_v2\simul_back_100_Fortaleza_2m_v2_ts.csv", index=False)
+
 pd.options.mode.chained_assignment = None  # default='warn'
 
 
@@ -93,7 +98,7 @@ def refine(suspects_gdf):
     Então esta função realiza refino das embarcações supeitas.
     '''
 
-    print('Refining...')
+    print('Refininando resultados...')
     # Primeiro cria-se uma chave única de posição
     suspects_gdf['pos_unq'] = suspects_gdf.lat * suspects_gdf.lon
 
@@ -101,6 +106,18 @@ def refine(suspects_gdf):
     suspects_refined_lst = [suspects_gdf.loc[suspects_gdf['pos_unq'] == unq_key].sort_values('tdelta_h').iloc[0] for unq_key in suspects_gdf.pos_unq.unique()]
 
     suspects_refined = gpd.GeoDataFrame(suspects_refined_lst)  # recria o GeoDataFrame
+
+    # Contagem das embarcações
+    ships_suspects = suspects_refined.MMSI.unique()
+    ship_types = []
+    for unq_mmsi in ships_suspects:
+        slct = suspects_refined[suspects_refined.MMSI == unq_mmsi]
+        ship_types.append(slct.Tipo.dropna().unique())
+
+    ship_types = [tp[0] for tp in ship_types if tp.size > 0]
+
+    print(f'Total de Embarcações interceptadas: {ships_suspects.size}')
+    print(f'das quais {len(ship_types)} possuem identificação de Tipo')
 
     return suspects_refined
 
@@ -135,25 +152,26 @@ def plot(simul, suspects_gdf):
     plt.close()
 
 
-# Setar diretório de trabalho
-os.chdir(r'C:\Users\diego_home\Documents\BLOG_PORTFOLIO\ais_simul_matchup')
+# INPUTS
+WDIR = r'C:\Users\diego_home\Documents\BLOG_PORTFOLIO\ais_simul_matchup'
+os.chdir(WDIR)  # Setar diretório de trabalho
 
-# Caminho dos arquivos de simulação e AIS
-simul_path = r"./simul_back_Fortaleza_subset.csv"
-ais_path = r"./AIS_CE_202201_subset.csv"
+SIMUL_PATH = r"./simul_back_Fortaleza_subset.csv"
+AIS_PATH = r"./AIS_CE_202201_subset.csv"
+FILENAME_OUT = 'AIS_CE_202201_subset_suspects'
 
-# CARREGAR AIS E SIMULAÇAO
-simul = csv2gdf(simul_path)
-ais = csv2gdf(ais_path)
+# 1. CARREGAR AIS E SIMULAÇAO
+simul = csv2gdf(SIMUL_PATH)
+ais = csv2gdf(AIS_PATH)
 
-# MATCHUP ESPAÇO-TEMPORAL
+# 2. MATCHUP ESPAÇO-TEMPORAL
 suspects_gdf = matchup(simul, ais, tdelta=12, buffer_size=0.2)
 
-# REFINAR RESULTADOS
+# 3. REFINAR RESULTADOS
 suspects_refined = refine(suspects_gdf)
 
-# SALVAR
-write(suspects_refined, 'AIS_CE_202201_subset_suspects', save_shp=True)
+# 4. SALVAR
+write(suspects_refined, FILENAME_OUT, save_shp=True)
 
-# PLOTAR SIMULAÇAO VS EMBARCAÇÕES SUSPEITAS
+# 5. PLOTAR SIMULAÇAO VS EMBARCAÇÕES SUSPEITAS
 plot(simul, suspects_gdf)
